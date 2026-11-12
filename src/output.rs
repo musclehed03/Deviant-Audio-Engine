@@ -15,10 +15,18 @@ impl Format {
     pub fn validate(self) -> Result<Self, String> {
         if !(8000..=384000).contains(&self.sample_rate)
             || !(1..=2).contains(&self.channels)
-            || !matches!((self.container_bits, self.valid_bits, self.float),
-                (16,16,false) | (24,24,false) | (32,24,false) | (32,32,false) | (32,32,true))
+            || !matches!(
+                (self.container_bits, self.valid_bits, self.float),
+                (16, 16, false)
+                    | (24, 24, false)
+                    | (32, 24, false)
+                    | (32, 32, false)
+                    | (32, 32, true)
+            )
         {
-            return Err("unsupported format: mono/stereo PCM16/24/32 or float32, 8–384 kHz required".into());
+            return Err(
+                "unsupported format: mono/stereo PCM16/24/32 or float32, 8–384 kHz required".into(),
+            );
         }
         Ok(self)
     }
@@ -39,6 +47,7 @@ pub struct StreamStatus {
     pub error: Option<String>,
     pub underrun_frames: u64,
     pub queued_frames: usize,
+    pub pending_device_frames: usize,
 }
 pub struct Queue {
     pub samples: VecDeque<f32>,
@@ -51,16 +60,37 @@ impl Queue {
     pub fn new(format: Format) -> SharedQueue {
         let capacity = format.sample_rate as usize * format.channels as usize * 2;
         Arc::new(Mutex::new(Self {
-            samples: VecDeque::with_capacity(capacity), capacity,
-            status: StreamStatus { format: Some(format), ..Default::default() }, stop: false,
+            samples: VecDeque::with_capacity(capacity),
+            capacity,
+            status: StreamStatus {
+                format: Some(format),
+                ..Default::default()
+            },
+            stop: false,
         }))
     }
     pub fn feed(&mut self, samples: &[f32], rate: u32, channels: u16) -> Result<(), String> {
         let f = self.status.format.ok_or("no stream")?;
-        if !self.status.active { return Err(self.status.error.clone().unwrap_or("stream is inactive".into())); }
-        if f.sample_rate != rate || f.channels != channels { return Err("PCM rate/channels must match negotiated output; resample explicitly first".into()); }
-        if !samples.len().is_multiple_of(channels as usize) || samples.iter().any(|v| !v.is_finite()) { return Err("invalid interleaved PCM".into()); }
-        if samples.len() > self.capacity - self.samples.len() { return Err("queue full; retry after output consumes frames".into()); }
+        if !self.status.active {
+            return Err(self
+                .status
+                .error
+                .clone()
+                .unwrap_or("stream is inactive".into()));
+        }
+        if f.sample_rate != rate || f.channels != channels {
+            return Err(
+                "PCM rate/channels must match negotiated output; resample explicitly first".into(),
+            );
+        }
+        if !samples.len().is_multiple_of(channels as usize)
+            || samples.iter().any(|v| !v.is_finite())
+        {
+            return Err("invalid interleaved PCM".into());
+        }
+        if samples.len() > self.capacity - self.samples.len() {
+            return Err("queue full; retry after output consumes frames".into());
+        }
         self.samples.extend(samples);
         Ok(())
     }
@@ -69,15 +99,22 @@ impl Queue {
         let width = f.container_bits as usize / 8;
         let mut missing = 0usize;
         for out in bytes.chunks_exact_mut(width) {
-            let sample = self.samples.pop_front().unwrap_or_else(|| { missing += 1; 0.0 });
-            if f.float { out.copy_from_slice(&sample.to_le_bytes()); }
-            else {
+            let sample = self.samples.pop_front().unwrap_or_else(|| {
+                missing += 1;
+                0.0
+            });
+            if f.float {
+                out.copy_from_slice(&sample.to_le_bytes());
+            } else {
                 let scale = (1u64 << (f.valid_bits - 1)) as f64;
-                let v = ((sample as f64).clamp(-1.0, 1.0) * scale).round().clamp(-scale, scale - 1.0) as i64;
+                let v = ((sample as f64).clamp(-1.0, 1.0) * scale)
+                    .round()
+                    .clamp(-scale, scale - 1.0) as i64;
                 let aligned = (v << (f.container_bits - f.valid_bits)) as i32;
                 out.copy_from_slice(&aligned.to_le_bytes()[..width]);
             }
         }
+        self.status.pending_device_frames = (bytes.len() / width - missing) / f.channels as usize;
         self.status.underrun_frames += (missing / f.channels as usize) as u64;
     }
     pub fn snapshot(&self) -> StreamStatus {
@@ -95,45 +132,182 @@ pub trait ExclusiveDevice {
 pub fn negotiate(device: &mut impl ExclusiveDevice, requested: Format) -> Result<Format, String> {
     requested.validate()?;
     let mut candidates = vec![requested];
-    for (container_bits, valid_bits, float) in [(32,32,true),(32,24,false),(24,24,false),(16,16,false),(32,32,false)] {
-        let f = Format { container_bits, valid_bits, float, ..requested };
-        if !candidates.contains(&f) { candidates.push(f); }
+    for (container_bits, valid_bits, float) in [
+        (32, 32, true),
+        (32, 24, false),
+        (24, 24, false),
+        (16, 16, false),
+        (32, 32, false),
+    ] {
+        let f = Format {
+            container_bits,
+            valid_bits,
+            float,
+            ..requested
+        };
+        if !candidates.contains(&f) {
+            candidates.push(f);
+        }
     }
     let mut failures = Vec::new();
     for f in candidates {
         match device.supports(f) {
-            Ok(true) => match device.open(f) { Ok(()) => return Ok(f), Err(e) => failures.push(e) },
-            Ok(false) => (), Err(e) => failures.push(e),
+            Ok(true) => match device.open(f) {
+                Ok(()) => return Ok(f),
+                Err(e) => failures.push(e),
+            },
+            Ok(false) => (),
+            Err(e) => failures.push(e),
         }
     }
-    Err(format!("exclusive unavailable at {} Hz / {} channels; no shared stream opened: {}", requested.sample_rate, requested.channels, failures.join("; ")))
+    Err(format!(
+        "exclusive unavailable at {} Hz / {} channels; no shared stream opened: {}",
+        requested.sample_rate,
+        requested.channels,
+        failures.join("; ")
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    pub fn format() -> Format { Format { sample_rate:48000, channels:2, container_bits:16, valid_bits:16, float:false } }
-    struct Mock { available: bool, opened: Vec<Format> }
-    impl ExclusiveDevice for Mock {
-        fn supports(&mut self, f: Format) -> Result<bool,String> { Ok(f.container_bits == 16) }
-        fn open(&mut self, f: Format) -> Result<(),String> { if !self.available { return Err("device busy".into()); } self.opened.push(f); Ok(()) }
+    pub fn format() -> Format {
+        Format {
+            sample_rate: 48000,
+            channels: 2,
+            container_bits: 16,
+            valid_bits: 16,
+            float: false,
+        }
     }
-    #[test] fn mock_negotiation_and_busy() {
-        let mut d = Mock { available:true, opened:vec![] };
-        assert_eq!(negotiate(&mut d, Format { float:true, container_bits:32, valid_bits:32, ..format() }).unwrap(), format());
+    struct Mock {
+        available: bool,
+        opened: Vec<Format>,
+    }
+    impl ExclusiveDevice for Mock {
+        fn supports(&mut self, f: Format) -> Result<bool, String> {
+            Ok(f.container_bits == 16)
+        }
+        fn open(&mut self, f: Format) -> Result<(), String> {
+            if !self.available {
+                return Err("device busy".into());
+            }
+            self.opened.push(f);
+            Ok(())
+        }
+    }
+    #[test]
+    fn mock_negotiation_and_busy() {
+        let mut d = Mock {
+            available: true,
+            opened: vec![],
+        };
+        assert_eq!(
+            negotiate(
+                &mut d,
+                Format {
+                    float: true,
+                    container_bits: 32,
+                    valid_bits: 32,
+                    ..format()
+                }
+            )
+            .unwrap(),
+            format()
+        );
         assert_eq!(d.opened, vec![format()]);
         d.available = false;
-        assert!(negotiate(&mut d, format()).unwrap_err().contains("no shared stream"));
+        assert!(negotiate(&mut d, format())
+            .unwrap_err()
+            .contains("no shared stream"));
     }
-    #[test] fn mock_event_fill_backpressure_and_underrun() {
-        let q = Queue::new(format()); let mut q = q.lock().unwrap(); q.status.active = true;
-        assert!(q.feed(&[0.0,0.0],44100,2).is_err());
-        assert!(q.feed(&[f32::NAN,0.0],48000,2).is_err());
-        assert!(q.feed(&vec![0.0;192002],48000,2).is_err());
-        q.feed(&[-1.0,1.0],48000,2).unwrap();
-        let mut bytes = [0;8]; q.render(&mut bytes);
-        assert_eq!(bytes, [0,128,255,127,0,0,0,0]);
-        assert_eq!(q.snapshot().underrun_frames,1);
-        assert_eq!(q.snapshot().queued_frames,0);
+    #[test]
+    fn mock_event_fill_backpressure_and_underrun() {
+        let q = Queue::new(format());
+        let mut q = q.lock().unwrap();
+        q.status.active = true;
+        assert!(q.feed(&[0.0, 0.0], 44100, 2).is_err());
+        assert!(q.feed(&[f32::NAN, 0.0], 48000, 2).is_err());
+        assert!(q.feed(&vec![0.0; 192002], 48000, 2).is_err());
+        q.feed(&[-1.0, 1.0], 48000, 2).unwrap();
+        let mut bytes = [0; 8];
+        q.render(&mut bytes);
+        assert_eq!(bytes, [0, 128, 255, 127, 0, 0, 0, 0]);
+        assert_eq!(q.snapshot().underrun_frames, 1);
+        assert_eq!(q.snapshot().queued_frames, 0);
+    }
+    #[test]
+    fn pcm_container_encoding_and_frame_accounting() {
+        for (bits, valid, float, expected) in [
+            (24, 24, false, vec![0, 0, 128, 255, 255, 127]),
+            (32, 24, false, vec![0, 0, 0, 128, 0, 255, 255, 127]),
+            (32, 32, false, vec![0, 0, 0, 128, 255, 255, 255, 127]),
+            (
+                32,
+                32,
+                true,
+                [-1.0f32, 1.0]
+                    .iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect(),
+            ),
+        ] {
+            let f = Format {
+                container_bits: bits,
+                valid_bits: valid,
+                float,
+                ..format()
+            };
+            f.validate().unwrap();
+            let q = Queue::new(f);
+            let mut q = q.lock().unwrap();
+            q.status.active = true;
+            q.feed(&[-1.0, 1.0], 48000, 2).unwrap();
+            let mut bytes = vec![0; f.bytes_per_frame()];
+            q.render(&mut bytes);
+            assert_eq!(bytes, expected);
+            assert_eq!(q.status.pending_device_frames, 1);
+            q.render(&mut bytes);
+            assert_eq!(q.status.pending_device_frames, 0);
+            assert_eq!(q.status.underrun_frames, 1);
+        }
+    }
+    #[test]
+    fn rejected_feed_does_not_change_queue() {
+        let q = Queue::new(format());
+        let mut q = q.lock().unwrap();
+        assert!(q.feed(&[0.1, 0.2], 48000, 2).is_err());
+        q.status.active = true;
+        q.feed(&[0.1, 0.2], 48000, 2).unwrap();
+        assert!(q.feed(&[0.3], 48000, 2).is_err());
+        assert_eq!(q.samples.len(), 2);
+        q.status.active = false;
+        q.status.error = Some("device removed".into());
+        assert_eq!(q.feed(&[0.0, 0.0], 48000, 2).unwrap_err(), "device removed");
+    }
+    #[test]
+    fn negotiation_never_changes_rate_or_channels() {
+        struct Unsupported(Vec<Format>);
+        impl ExclusiveDevice for Unsupported {
+            fn supports(&mut self, f: Format) -> Result<bool, String> {
+                self.0.push(f);
+                Ok(false)
+            }
+            fn open(&mut self, _: Format) -> Result<(), String> {
+                panic!("must not open unsupported format")
+            }
+        }
+        let mut d = Unsupported(vec![]);
+        let f = Format {
+            sample_rate: 44100,
+            channels: 1,
+            ..format()
+        };
+        assert!(negotiate(&mut d, f).is_err());
+        assert!(d
+            .0
+            .iter()
+            .all(|x| x.sample_rate == 44100 && x.channels == 1));
+        assert_eq!(d.0.len(), 5);
     }
 }

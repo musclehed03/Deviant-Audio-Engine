@@ -2,6 +2,7 @@
 name = "deviant-audio-engine"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 license = "GPL-3.0-only"
 description = "Standalone native decoding and Windows exclusive audio output"
 
