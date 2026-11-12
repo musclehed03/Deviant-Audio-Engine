@@ -31,6 +31,10 @@ unit/mock tests, release builds and an exported C ABI smoke test on both Windows
 and Linux. Tests never need a real audio endpoint. `examples/ffi_smoke.py` uses
 only Python's standard library and does not open a hardware stream.
 
+For the interactive Windows USB DAC playback check, see [TESTING.md](TESTING.md).
+It lists devices, opens exclusive output and plays a generated tone plus the
+committed FLAC fixture through the existing engine APIs.
+
 ## Output behavior
 
 * Active render endpoints are enumerated by stable endpoint ID and friendly

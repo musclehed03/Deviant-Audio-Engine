@@ -13,8 +13,9 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo test --locked --all-targets
       - run: cargo build --locked --release
+      - run: cargo build --locked --release --example hardware_playback
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
