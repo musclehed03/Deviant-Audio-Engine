@@ -36,6 +36,7 @@ impl Engine {
             q.status.active = false;
             q.status.exclusive = false;
             q.status.pending_device_frames = 0;
+            q.samples.clear();
             self.last_stream = q.snapshot();
         }
     }

@@ -9,7 +9,7 @@ use std::{
 };
 use symphonia::core::{
     audio::SampleBuffer,
-    codecs::{Decoder, DecoderOptions, CODEC_TYPE_AAC, CODEC_TYPE_FLAC, CODEC_TYPE_PCM_S16LE},
+    codecs::{Decoder, DecoderOptions, CODEC_TYPE_AAC},
     errors::Error,
     formats::{FormatOptions, FormatReader},
     io::MediaSourceStream,
@@ -146,13 +146,11 @@ impl NativeDecoder {
         let mut initial = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
         initial.copy_interleaved_ref(decoded);
         let initial = initial.samples().to_vec();
-        let codec = match p.codec {
-            CODEC_TYPE_AAC => "aac",
-            CODEC_TYPE_FLAC => "flac",
-            CODEC_TYPE_PCM_S16LE => "pcm_s16le",
-            _ => "other",
-        }
-        .to_string();
+        let codec = symphonia::default::get_codecs()
+            .get_codec(p.codec)
+            .map(|descriptor| descriptor.short_name)
+            .unwrap_or("unknown")
+            .to_string();
         let info = TrackInfo {
             codec,
             sample_rate: spec.rate,
@@ -270,7 +268,9 @@ impl NativeDecoder {
             self.payload_frames += frames as u64;
             self.pending.extend(samples);
         }
-        self.info.measured_payload_bitrate_bps = (self.payload_bytes * 8 * self.info.sample_rate as u64).checked_div(self.payload_frames);
+        self.info.measured_payload_bitrate_bps =
+            (self.payload_bytes * 8 * self.info.sample_rate as u64)
+                .checked_div(self.payload_frames);
         let count = wanted.min(self.pending.len());
         Ok(self.pending.drain(..count).collect())
     }
@@ -284,7 +284,8 @@ pub fn resample(
     target_rate: u32,
     channels: u16,
 ) -> Result<Vec<f32>, String> {
-    if !(8000..=384000).contains(&source_rate)
+    if samples.len() > 16_777_216
+        || !(8000..=384000).contains(&source_rate)
         || !(8000..=384000).contains(&target_rate)
         || !(1..=2).contains(&channels)
         || !samples.len().is_multiple_of(channels as usize)

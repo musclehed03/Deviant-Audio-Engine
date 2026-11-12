@@ -15,3 +15,7 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: python examples/ffi_smoke.py

@@ -31,3 +31,11 @@ with `-c:a flac -sample_fmt s16`, `-c:a aac -b:a 128k`, or
 `-c:a libopus -b:a 96k`. They are provided under the repository GPLv3 license;
 no third-party recordings are included. FFmpeg is a development-only fixture
 generator, never linked or invoked by the engine or CI.
+
+AAC gapless limitation: Symphonia 0.5.5's MP4/AAC path does not remove all
+encoder priming and end padding. The 2400-frame AAC fixture yields 4096 decoded
+frames. Exact AAC clip duration and seamless track transitions are not promised.
+FLAC and Ogg Opus fixtures yield 2400 frames. Symphonia maps end-of-stream to
+UnexpectedEof, which can also occur on truncated input; successful EOF alone
+is not an integrity certificate. No per-file FLAC checksum verification is
+exposed by this engine.
