@@ -127,31 +127,7 @@ pub fn start(id: String, requested: Format) -> Result<(SharedQueue, JoinHandle<(
                     .get_default_device(&Direction::Render)
                     .map_err(err)?
             } else {
-                // NOTE: do not use enumerator.get_device(&id) here.
-                // wasapi 0.22's get_device builds the endpoint ID as a
-                // temporary HSTRING, so the pointer it hands Windows
-                // dangles and GetDevice fails with ERROR_FILE_NOT_FOUND
-                // (0x80070002) for every device. Enumerate and match
-                // by ID instead — the same path devices() already uses.
-                let collection = enumerator
-                    .get_device_collection(&Direction::Render)
-                    .map_err(|e| format!("resolve: enumerate render devices: {e}"))?;
-                let mut found = None;
-                for candidate in &collection {
-                    let candidate = candidate
-                        .map_err(|e| format!("resolve: enumerate render devices: {e}"))?;
-                    if candidate
-                        .get_id()
-                        .map_err(|e| format!("resolve: read device id: {e}"))?
-                        == id
-                    {
-                        found = Some(candidate);
-                        break;
-                    }
-                }
-                found.ok_or_else(|| {
-                    format!("resolve: device id not present in render enumeration: {id}")
-                })?
+                enumerator.get_device(&id).map_err(err)?
             };
             if !matches!(device.get_direction(), Direction::Render) {
                 return Err("device is not a render endpoint".into());
